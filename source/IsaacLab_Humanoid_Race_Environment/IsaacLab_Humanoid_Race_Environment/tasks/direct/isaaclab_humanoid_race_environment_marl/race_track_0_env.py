@@ -10,7 +10,8 @@ import torch
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, RigidObject, AssetBase
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg, AssetBase
+from isaaclab.sim import CollisionPropertiesCfg
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -22,8 +23,22 @@ from isaaclab.utils.math import sample_uniform, quat_apply_inverse, yaw_quat, \
 
 from .race_track_0_env_config import RaceTrack0EnvCfg
 
+def define_markers(prim_path: str, color: tuple[float, float, float]) -> VisualizationMarkers:
+    """Define markers with various different shapes."""
+    marker_cfg = VisualizationMarkersCfg(
+        prim_path=prim_path,
+        markers={
+                "arrow": sim_utils.UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.25, 0.25, 0.5),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                ),
+        },
+    )
+    return VisualizationMarkers(cfg=marker_cfg)
 class RaceTrack0Env(DirectMARLEnv):
     cfg: RaceTrack0EnvCfg
+
 
     def __init__(self, cfg: RaceTrack0EnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
@@ -38,6 +53,9 @@ class RaceTrack0Env(DirectMARLEnv):
             self.commands[agent_name] = torch.zeros((self.cfg.scene.num_envs, 3), device=self.device)
         self.heading_control_stiffness = 0.5 # large value makes the robot follow the command more rapidly
         self.action_scale = 0.5
+        self.target_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.goal_scale = torch.tensor([0.25, 8.0, 0.5], device=self.device)
+        self.rankings = {env_id: [] for env_id in range(self.num_envs)}
 
 
     def _setup_scene(self):
@@ -56,6 +74,18 @@ class RaceTrack0Env(DirectMARLEnv):
             self.scene.sensors[f"ankle_contact_{agent_name}"] = ContactSensor(ankle_contact_cfg)
             self.scene.sensors[f"torso_contact_{agent_name}"] = ContactSensor(torso_contact_cfg)
 
+        # Goal Object
+        goal_cfg = RigidObjectCfg(
+            prim_path="/World/Goal",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.25, 8.0, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(100.0, 100.0, 0.0)),
+        )
+        self.scene.rigid_objects["goal"] = RigidObject(goal_cfg)
+
         # # 地板
         # self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         # self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -65,26 +95,68 @@ class RaceTrack0Env(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+        # add markers
+        # Goal marker (Cyan)
+        self.goal_marker = define_markers("/Visuals/Goal", (0.0, 1.0, 1.0))
+        # Command marker (Red)
+        self.cmd_marker = define_markers("/Visuals/Command", (1.0, 0.0, 0.0))
+
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
 
         # initialize commands
-        self.target_heading = torch.zeros(self.cfg.scene.num_envs, device=self.device)
+        self.target_pos = torch.zeros((self.num_envs, 3), device=self.device)
                              
 
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]) -> None:
         self.actions = actions
         
         # update z angular velocity commands for all agents
+        # update z angular velocity commands for all agents
+        # update z angular velocity commands for all agents
         for agent_name in self.cfg.possible_agents:
             robot = self.scene.articulations[agent_name]
+            # calculate vector to target
+            target_vec = self.target_pos - robot.data.root_pos_w
+            # calculate desired heading
+            desired_yaw = torch.atan2(target_vec[:, 1], target_vec[:, 0])
+            
             current_heading = robot.data.heading_w
-            heading_error = wrap_to_pi(self.target_heading - current_heading)
+            heading_error = wrap_to_pi(desired_yaw - current_heading)
+            
+            # set forward velocity command (e.g. 1.0 m/s) if far from target
+            # simple logic: always move forward if target is far enough
+            dist_to_target = torch.norm(target_vec[:, :2], dim=1)
+            self.commands[agent_name][:, 0] = torch.where(dist_to_target > 0.5, 1.0, 0.0)
+            
             self.commands[agent_name][:, 2] = torch.clamp(
                 heading_error * self.heading_control_stiffness,
                 min=-1.0,
                 max=1.0
             )
+
+        # Visualize command arrows
+        all_cmd_pos = []
+        all_cmd_orient = []
+        for agent_name in self.cfg.possible_agents:
+            robot = self.scene.articulations[agent_name]
+            # Command arrow position: 2m above robot
+            cmd_pos = robot.data.root_pos_w.clone()
+            cmd_pos[:, 2] += 2.0
+            all_cmd_pos.append(cmd_pos)
+            
+            # Command arrow orientation: pointing to target
+            target_vec = self.target_pos - robot.data.root_pos_w
+            desired_yaw = torch.atan2(target_vec[:, 1], target_vec[:, 0])
+            # Convert yaw to quaternion (assuming Z-up)
+            # We need to construct a quaternion from Euler angles (roll=0, pitch=0, yaw=desired_yaw)
+            # Since we don't have a direct euler_to_quat for batch, we can use existing utilities or simple math
+            # Here we use quat_from_angle_axis for Z axis rotation
+            zeros = torch.zeros_like(desired_yaw)
+            cmd_orient = quat_from_euler_xyz(zeros, zeros, desired_yaw)
+            all_cmd_orient.append(cmd_orient)
+            
+        self.cmd_marker.visualize(translations=torch.cat(all_cmd_pos), orientations=torch.cat(all_cmd_orient))
 
     def _apply_action(self) -> None:
         for agent_name in self.cfg.possible_agents:
@@ -96,6 +168,7 @@ class RaceTrack0Env(DirectMARLEnv):
             self._last_actions[agent_name][:] = self.actions[agent_name]
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        self._check_rankings()
         observations = {}
         for agent_name in self.cfg.possible_agents:
             robot = self.scene.articulations[agent_name]
@@ -114,6 +187,36 @@ class RaceTrack0Env(DirectMARLEnv):
             ]
             observations[agent_name] = torch.hstack(obs_list)
         return observations
+
+    def _check_rankings(self):
+        """Check if agents have reached the goal and update rankings."""
+        for agent_name in self.cfg.possible_agents:
+            robot = self.scene.articulations[agent_name]
+            
+            # Check distance to target (Bounding Box Check)
+            # Goal is at self.target_pos
+            # We check if robot is within the box defined by goal_scale
+            # User requested no margin, so we check strict bounds
+            margin = 0.0
+            rel_pos = robot.data.root_pos_w - self.target_pos
+            
+            # Check X and Y bounds
+            half_size = self.goal_scale / 2.0
+            in_x = torch.abs(rel_pos[:, 0]) < (half_size[0] + margin)
+            in_y = torch.abs(rel_pos[:, 1]) < (half_size[1] + margin)
+            
+            has_reached_goal = in_x & in_y
+            
+            # Iterate through environments to update rankings
+            # Note: This loop is slow in python but fine for verification/small num_envs
+            # For large scale training, this should be vectorized or moved to warp/cuda
+            contact_indices = torch.nonzero(has_reached_goal).flatten()
+            for env_id in contact_indices:
+                env_id = env_id.item()
+                if agent_name not in self.rankings[env_id]:
+                    self.rankings[env_id].append(agent_name)
+                    rank = len(self.rankings[env_id])
+                    print(f"[INFO] Env {env_id}: {agent_name} finished {rank}!")
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
         total_reward = {agent: torch.zeros((self.num_envs, 1), device=self.device) for agent in self.cfg.possible_agents}
@@ -136,6 +239,27 @@ class RaceTrack0Env(DirectMARLEnv):
             first_robot_name = self.cfg.possible_agents[0]
             env_ids = self.scene.articulations[first_robot_name]._ALL_INDICES
         super()._reset_idx(env_ids)
+        
+        # sample new targets for reset environments
+        # For now, let's sample random points ahead on X axis, with some Y variation
+        # You can customize this range based on your track size
+        self.target_pos[env_ids, 0] = sample_uniform(5.0, 10.0, (len(env_ids),), device=self.device)
+        self.target_pos[env_ids, 1] = 0.0
+        self.target_pos[env_ids, 2] = 0.0 # ground level
+
+        # visualize targets
+        self.goal_marker.visualize(self.target_pos)
+        
+        # Teleport goal object to target position
+        # Orientation: Identity
+        goal_pos = self.target_pos.clone()
+        goal_pos[:, 2] += 0.25 # Lift half size so it sits on ground
+        goal_orient = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
+        self.scene.rigid_objects["goal"].write_root_pose_to_sim(torch.cat([goal_pos, goal_orient], dim=-1), env_ids)
+        
+        # Reset rankings for reset environments
+        for env_id in env_ids:
+            self.rankings[env_id.item()] = []
 
 
 @torch.jit.script
