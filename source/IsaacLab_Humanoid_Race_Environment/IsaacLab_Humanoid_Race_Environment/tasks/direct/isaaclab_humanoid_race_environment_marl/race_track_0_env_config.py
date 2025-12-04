@@ -48,13 +48,13 @@ class RaceTrack0EnvCfg(DirectMARLEnvCfg):
         )
 
         # ground plane
-        self.ground_cfg = AssetBaseCfg(
-            prim_path="/World/ground",
-            spawn=sim_utils.UsdFileCfg(
-                usd_path=f"D:/RL2025/IsaacLab_Humanoid_Race_Environment/source/IsaacLab_Humanoid_Race_Environment/IsaacLab_Humanoid_Race_Environment/tasks/direct/isaaclab_humanoid_race_environment_marl/aseets/ttttt.usd",
-                scale=(1, 1, 1),
-            ),
-        )
+        # self.ground_cfg = AssetBaseCfg(
+        #     prim_path="/World/ground",
+        #     spawn=sim_utils.UsdFileCfg(
+        #         usd_path=f"../source/IsaacLab_Humanoid_Race_Environment/IsaacLab_Humanoid_Race_Environment/tasks/direct/isaaclab_humanoid_race_environment_marl/aseets/ttttt.usd",
+        #         scale=(1, 1, 1),
+        #     ),
+        # )
 
         # Number of robots
         num_robots = 5

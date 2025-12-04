@@ -60,7 +60,7 @@ class RaceTrack0Env(DirectMARLEnv):
 
     def _setup_scene(self):
         # create assets
-        cfg = sim_utils.UsdFileCfg(usd_path=f"D:/RL2025/IsaacLab_Humanoid_Race_Environment/source/IsaacLab_Humanoid_Race_Environment/IsaacLab_Humanoid_Race_Environment/tasks/direct/isaaclab_humanoid_race_environment_marl/aseets/runing_track0.usd")
+        cfg = sim_utils.UsdFileCfg(usd_path=f"../source/IsaacLab_Humanoid_Race_Environment/IsaacLab_Humanoid_Race_Environment/tasks/direct/isaaclab_humanoid_race_environment_marl/aseets/runing_track0.usd")
         cfg.func("/World/ground", cfg, translation=(0.0, 0.0, 0.0))
 
         # Loop through all possible agents to create and add them to the scene
