@@ -57,6 +57,7 @@ class RaceTrack1Env(DirectMARLEnv):
         self.target_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.goal_scale = torch.tensor([0.25, 7.0, 0.5], device=self.device)
         self.rankings = {env_id: [] for env_id in range(self.num_envs)}
+        self.min_dist_to_target = {agent: torch.full((self.num_envs,), float('inf'), device=self.device) for agent in self.cfg.possible_agents}
 
 
     def _setup_scene(self):
@@ -109,6 +110,7 @@ class RaceTrack1Env(DirectMARLEnv):
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]) -> None:
         self.actions = actions
         
+        env_0_log_strs = []
         # update z angular velocity commands for all agents
         # update z angular velocity commands for all agents
         for agent_name in self.cfg.possible_agents:
@@ -123,7 +125,16 @@ class RaceTrack1Env(DirectMARLEnv):
             
             # set forward velocity command (e.g. 1.0 m/s) if far from target
             # simple logic: always move forward if target is far enough
-            dist_to_target = torch.norm(target_vec[:, :2], dim=1)
+            # Calculate distance to goal boundary (Box Distance)
+            rel_pos_abs = torch.abs(target_vec[:, :2])
+            half_size = self.goal_scale[:2] / 2.0
+            dist_outside = torch.maximum(rel_pos_abs - half_size, torch.tensor(0.0, device=self.device))
+            dist_to_target = torch.norm(dist_outside, dim=1)
+            
+            # Update min distance
+            self.min_dist_to_target[agent_name] = torch.min(self.min_dist_to_target[agent_name], dist_to_target)
+            env_0_log_strs.append(f"{agent_name}: {self.min_dist_to_target[agent_name][0].item():.2f}")
+            
             self.commands[agent_name][:, 0] = torch.where(dist_to_target > 0.5, 1.0, 0.0)
             
             self.commands[agent_name][:, 2] = torch.clamp(
@@ -131,6 +142,8 @@ class RaceTrack1Env(DirectMARLEnv):
                 min=-1.0,
                 max=1.0
             )
+
+        print(f"[INFO] Min Dist (Env 0): " + ", ".join(env_0_log_strs))
 
         # Visualize command arrows
         all_cmd_pos = []
@@ -241,7 +254,7 @@ class RaceTrack1Env(DirectMARLEnv):
         # sample new targets for reset environments
         # For now, let's sample random points ahead on X axis, with some Y variation
         # You can customize this range based on your track size
-        self.target_pos[env_ids, 0] = sample_uniform(5.0, 10.0, (len(env_ids),), device=self.device)
+        self.target_pos[env_ids, 0] = 32.0
         self.target_pos[env_ids, 1] = 0.0
         self.target_pos[env_ids, 2] = 0.0 # ground level
 
@@ -258,6 +271,9 @@ class RaceTrack1Env(DirectMARLEnv):
         # Reset rankings for reset environments
         for env_id in env_ids:
             self.rankings[env_id.item()] = []
+            
+        for agent in self.cfg.possible_agents:
+            self.min_dist_to_target[agent][env_ids] = float('inf')
 
 
 @torch.jit.script
