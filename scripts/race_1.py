@@ -95,12 +95,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     agent_names = env.possible_agents
     agent_models = args_cli.agent_models if args_cli.agent_models else []
 
-    if len(agent_models) != len(agent_names):
+    if len(agent_models) > len(agent_names):
         raise ValueError(
-            f"Number of agent models ({len(agent_models)}) does not match the number of agents ({len(agent_names)})."
+            f"Number of agent models ({len(agent_models)}) exceeds the number of agents ({len(agent_names)})."
         )
+    elif len(agent_models) < len(agent_names):
+        print(f"[WARNING]: Only {len(agent_models)} models provided for {len(agent_names)} agents. Remaining agents will be stationary.")
 
-    for i, agent_name in enumerate(agent_names):
+    for i in range(len(agent_models)):
+        agent_name = agent_names[i]
         runner = Runner(env, experiment_cfg)
         runner.agent.load(agent_models[i])
         runner.agent.set_running_mode("eval")
@@ -113,9 +116,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         # run everything in inference mode
         with torch.inference_mode():
             actions = {}
-            for agent_name, runner in runners.items():
-                outputs = runner.agent.act(obs[agent_name], timestep=0, timesteps=0)
-                actions[agent_name] = outputs[-1].get("mean_actions", outputs[0])
+            actions = {}
+            for agent_name in agent_names:
+                if agent_name in runners:
+                    outputs = runners[agent_name].agent.act(obs[agent_name], timestep=0, timesteps=0)
+                    actions[agent_name] = outputs[-1].get("mean_actions", outputs[0])
+                else:
+                    # Zero action for stationary agent
+                    # Get action dimension from environment config
+                    action_dim = env_cfg.action_spaces[agent_name]
+                    actions[agent_name] = torch.zeros((env.num_envs, action_dim), device=env.device)
             # apply actions
             obs, _, _, _, _ = env.step(actions)
 
