@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import torch
+import numpy as np
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
@@ -23,15 +24,22 @@ from isaaclab.utils.math import sample_uniform, quat_apply_inverse, yaw_quat, \
 
 from .race_track_0_env_config import RaceTrack0EnvCfg
 
-def define_markers(prim_path: str, color: tuple[float, float, float]) -> VisualizationMarkers:
-    """Define markers with various different shapes."""
+def define_number_marker(prim_path: str, number: int) -> VisualizationMarkers:
+    """Define number markers for each robot."""
+    number_files = {
+        1: "3D_Number_ONE.usdz",
+        2: "3D_Number_TWO.usdz",
+        3: "3D_Number_THREE.usdz",
+        4: "3D_Number_FOUR.usdz",
+        5: "3D_Number_FIVE.usdz",
+    }
+    
     marker_cfg = VisualizationMarkersCfg(
         prim_path=prim_path,
         markers={
-                "arrow": sim_utils.UsdFileCfg(
-                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.25, 0.25, 0.5),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                "number": sim_utils.UsdFileCfg(
+                    usd_path=f"../source/IsaacLab_Humanoid_Race_Environment/IsaacLab_Humanoid_Race_Environment/tasks/direct/isaaclab_humanoid_race_environment_marl/aseets/{number_files[number]}",
+                    scale=(0.01, 0.01, 0.01),
                 ),
         },
     )
@@ -54,7 +62,7 @@ class RaceTrack0Env(DirectMARLEnv):
         self.heading_control_stiffness = 0.5 # large value makes the robot follow the command more rapidly
         self.action_scale = 0.5
         self.target_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        self.goal_scale = torch.tensor([0.25, 8.0, 0.5], device=self.device)
+        self.goal_scale = torch.tensor([0.25, 8.9, 0.5], device=self.device)
         self.rankings = {env_id: [] for env_id in range(self.num_envs)}
         self.min_dist_to_target = {agent: torch.full((self.num_envs,), float('inf'), device=self.device) for agent in self.cfg.possible_agents}
 
@@ -79,7 +87,7 @@ class RaceTrack0Env(DirectMARLEnv):
         goal_cfg = RigidObjectCfg(
             prim_path="/World/Goal",
             spawn=sim_utils.CuboidCfg(
-                size=(0.25, 8.0, 0.5),
+                size=(0.25, 8.9, 0.5),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             ),
@@ -96,11 +104,10 @@ class RaceTrack0Env(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # add markers
-        # Goal marker (Cyan)
-        self.goal_marker = define_markers("/Visuals/Goal", (0.0, 1.0, 1.0))
-        # Command marker (Red)
-        self.cmd_marker = define_markers("/Visuals/Command", (1.0, 0.0, 0.0))
+        # add markers - Create individual number markers for each robot
+        self.number_markers = {}
+        for i, agent_name in enumerate(self.cfg.possible_agents, 1):
+            self.number_markers[agent_name] = define_number_marker(f"/Visuals/Number_{agent_name}", i)
 
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
@@ -148,28 +155,21 @@ class RaceTrack0Env(DirectMARLEnv):
 
         print(f"[INFO] Min Dist (Env 0): " + ", ".join(env_0_log_strs))
 
-        # Visualize command arrows
-        all_cmd_pos = []
-        all_cmd_orient = []
+        # Visualize number markers above each robot
         for agent_name in self.cfg.possible_agents:
             robot = self.scene.articulations[agent_name]
-            # Command arrow position: 2m above robot
-            cmd_pos = robot.data.root_pos_w.clone()
-            cmd_pos[:, 2] += 2.0
-            all_cmd_pos.append(cmd_pos)
+            # Number marker position: 1m above robot
+            marker_pos = robot.data.root_pos_w.clone()
+            marker_pos[:, 2] += 1.0
             
-            # Command arrow orientation: pointing to target
-            target_vec = self.target_pos - robot.data.root_pos_w
-            desired_yaw = torch.atan2(target_vec[:, 1], target_vec[:, 0])
-            # Convert yaw to quaternion (assuming Z-up)
-            # We need to construct a quaternion from Euler angles (roll=0, pitch=0, yaw=desired_yaw)
-            # Since we don't have a direct euler_to_quat for batch, we can use existing utilities or simple math
-            # Here we use quat_from_angle_axis for Z axis rotation
-            zeros = torch.zeros_like(desired_yaw)
-            cmd_orient = quat_from_euler_xyz(zeros, zeros, desired_yaw)
-            all_cmd_orient.append(cmd_orient)
+            # Fixed orientation for number markers
+            num_envs = marker_pos.shape[0]
+            roll = torch.full((num_envs,), np.pi/2, device=self.device)
+            pitch = torch.zeros((num_envs,), device=self.device)
+            yaw = torch.full((num_envs,), np.pi/2, device=self.device)
             
-        self.cmd_marker.visualize(translations=torch.cat(all_cmd_pos), orientations=torch.cat(all_cmd_orient))
+            fixed_orientation = quat_from_euler_xyz(roll, pitch, yaw)
+            self.number_markers[agent_name].visualize(translations=marker_pos, orientations=fixed_orientation)
 
     def _apply_action(self) -> None:
         for agent_name in self.cfg.possible_agents:
@@ -261,7 +261,7 @@ class RaceTrack0Env(DirectMARLEnv):
         self.target_pos[env_ids, 2] = 0.0 # ground level
 
         # visualize targets
-        self.goal_marker.visualize(self.target_pos)
+        # self.goal_marker.visualize(self.target_pos)
         
         # Teleport goal object to target position
         # Orientation: Identity
