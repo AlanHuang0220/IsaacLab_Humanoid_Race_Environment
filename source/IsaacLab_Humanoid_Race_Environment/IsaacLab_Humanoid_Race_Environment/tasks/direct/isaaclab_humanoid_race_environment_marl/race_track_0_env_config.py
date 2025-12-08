@@ -66,10 +66,10 @@ class RaceTrack0EnvCfg(DirectMARLEnvCfg):
 
         # Initial positions for the robots
         initial_positions = [
-            (0.0, -1.0, 1.5),
-            (0.0, 1.0, 1.5),
-            (0.0, 0.0, 1.5),
             (0.0, -2.0, 1.5),
+            (0.0, -1.0, 1.5),
+            (0.0, 0.0, 1.5),
+            (0.0, 1.0, 1.5),
             (0.0, 2.0, 1.5),
         ]
 
